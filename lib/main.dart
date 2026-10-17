@@ -1,6 +1,9 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
   runApp(MyApp());
 }
 
@@ -10,8 +13,8 @@ class Reserva {
   final String canchaNombre;
   final String deporte;
   final String precio;
-  final DateTime fecha;
-  final TimeOfDay hora;
+  final String fechaStr; // Formato YYYY-MM-DD
+  final String horaSlot; // Ejemplo: "08:00 AM - 09:00 AM"
   final String userEmail;
 
   Reserva({
@@ -19,10 +22,30 @@ class Reserva {
     required this.canchaNombre,
     required this.deporte,
     required this.precio,
-    required this.fecha,
-    required this.hora,
+    required this.fechaStr,
+    required this.horaSlot,
     required this.userEmail,
   });
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'canchaNombre': canchaNombre,
+        'deporte': deporte,
+        'precio': precio,
+        'fechaStr': fechaStr,
+        'horaSlot': horaSlot,
+        'userEmail': userEmail,
+      };
+
+  factory Reserva.fromJson(Map<String, dynamic> json) => Reserva(
+        id: json['id'],
+        canchaNombre: json['canchaNombre'],
+        deporte: json['deporte'],
+        precio: json['precio'],
+        fechaStr: json['fechaStr'],
+        horaSlot: json['horaSlot'],
+        userEmail: json['userEmail'],
+      );
 }
 
 class MyApp extends StatelessWidget {
@@ -52,12 +75,68 @@ class _AuthScreenState extends State<AuthScreen> {
   TextEditingController emailController = TextEditingController();
   TextEditingController passwordController = TextEditingController();
 
-  static Map<String, String> registeredUsers = {};
-  // Almacenamiento central de reservas en memoria
-  static List<Reserva> globalReservations = [];
+  Map<String, String> registeredUsers = {};
+  List<Reserva> globalReservations = [];
 
   bool isLoggedIn = false;
   String currentUserEmail = '';
+  bool isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadDataFromStorage();
+  }
+
+  // Cargar usuarios y reservas desde SharedPreferences (Base de Datos Local)
+  Future<void> _loadDataFromStorage() async {
+    final prefs = await SharedPreferences.getInstance();
+
+    // Cargar Usuarios
+    final usersString = prefs.getString('registered_users');
+    if (usersString != null) {
+      Map<String, dynamic> decoded = jsonDecode(usersString);
+      registeredUsers = decoded.map((key, value) => MapEntry(key, value.toString()));
+    }
+
+    // Cargar Reservas
+    final reservationsString = prefs.getString('global_reservations');
+    if (reservationsString != null) {
+      List<dynamic> decodedList = jsonDecode(reservationsString);
+      globalReservations = decodedList.map((item) => Reserva.fromJson(item)).toList();
+    }
+
+    // Cargar Sesión Activa
+    final activeEmail = prefs.getString('active_user');
+    if (activeEmail != null && activeEmail.isNotEmpty) {
+      isLoggedIn = true;
+      currentUserEmail = activeEmail;
+    }
+
+    setState(() {
+      isLoading = false;
+    });
+  }
+
+  // Guardar Usuarios en Storage
+  Future<void> _saveUsersToStorage() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('registered_users', jsonEncode(registeredUsers));
+  }
+
+  // Guardar Reservas en Storage
+  Future<void> _saveReservationsToStorage() async {
+    final prefs = await SharedPreferences.getInstance();
+    List<Map<String, dynamic>> jsonList =
+        globalReservations.map((r) => r.toJson()).toList();
+    await prefs.setString('global_reservations', jsonEncode(jsonList));
+  }
+
+  // Guardar Estado de Sesión
+  Future<void> _setActiveUser(String email) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('active_user', email);
+  }
 
   void register() async {
     final result = await Navigator.pushNamed(context, '/register');
@@ -66,58 +145,34 @@ class _AuthScreenState extends State<AuthScreen> {
         registeredUsers[result['email']!] = result['password']!;
       });
 
+      await _saveUsersToStorage();
+
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('¡Registro exitoso! Ya puedes iniciar sesión.')),
       );
     }
   }
 
-  void login() {
+  void login() async {
     final enteredEmail = emailController.text.trim();
     final enteredPassword = passwordController.text.trim();
 
     if (registeredUsers.containsKey(enteredEmail) &&
         registeredUsers[enteredEmail] == enteredPassword) {
+      await _setActiveUser(enteredEmail);
       setState(() {
         isLoggedIn = true;
         currentUserEmail = enteredEmail;
       });
     } else if (!registeredUsers.containsKey(enteredEmail)) {
-      showDialog(
-        context: context,
-        builder: (BuildContext context) {
-          return AlertDialog(
-            title: Text('Error de inicio de sesión'),
-            content: Text('Este correo no está registrado. Por favor regístrate primero.'),
-            actions: <Widget>[
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(),
-                child: Text('Cerrar'),
-              ),
-            ],
-          );
-        },
-      );
+      _showErrorDialog('Este correo no está registrado. Por favor regístrate primero.');
     } else {
-      showDialog(
-        context: context,
-        builder: (BuildContext context) {
-          return AlertDialog(
-            title: Text('Error de inicio de sesión'),
-            content: Text('Contraseña incorrecta. Verifica tus datos.'),
-            actions: <Widget>[
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(),
-                child: Text('Cerrar'),
-              ),
-            ],
-          );
-        },
-      );
+      _showErrorDialog('Contraseña incorrecta. Verifica tus datos.');
     }
   }
 
-  void logout() {
+  void logout() async {
+    await _setActiveUser('');
     setState(() {
       isLoggedIn = false;
       currentUserEmail = '';
@@ -126,19 +181,40 @@ class _AuthScreenState extends State<AuthScreen> {
     });
   }
 
+  void _showErrorDialog(String message) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Error de inicio de sesión'),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: Text('Cerrar'),
+          )
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    if (isLoading) {
+      return Scaffold(
+        body: Center(child: CircularProgressIndicator()),
+      );
+    }
+
     if (isLoggedIn) {
       return HelloWorldScreen(
         userEmail: currentUserEmail,
         onLogout: logout,
         reservations: globalReservations,
+        onReservationsUpdated: _saveReservationsToStorage,
       );
     } else {
       return Scaffold(
-        appBar: AppBar(
-          title: Text('Inicio de Sesión o Registro'),
-        ),
+        appBar: AppBar(title: Text('Inicio de Sesión - Cancherito')),
         body: Center(
           child: SingleChildScrollView(
             child: Column(
@@ -146,8 +222,8 @@ class _AuthScreenState extends State<AuthScreen> {
               children: <Widget>[
                 Image.asset(
                   'images/cancherito.jpg',
-                  width: 280,
-                  height: 280,
+                  width: 260,
+                  height: 260,
                   errorBuilder: (context, error, stackTrace) =>
                       Icon(Icons.sports_soccer, size: 100, color: Colors.green),
                 ),
@@ -174,7 +250,7 @@ class _AuthScreenState extends State<AuthScreen> {
                     obscureText: true,
                   ),
                 ),
-                SizedBox(height: 30),
+                SizedBox(height: 25),
                 SizedBox(
                   width: 200,
                   height: 45,
@@ -208,9 +284,7 @@ class RegisterScreen extends StatelessWidget {
     TextEditingController registerPasswordController = TextEditingController();
 
     return Scaffold(
-      appBar: AppBar(
-        title: Text('Registro'),
-      ),
+      appBar: AppBar(title: Text('Registro')),
       body: Center(
         child: SingleChildScrollView(
           child: Column(
@@ -241,8 +315,8 @@ class RegisterScreen extends StatelessWidget {
               SizedBox(height: 20),
               ElevatedButton(
                 onPressed: () {
-                  final registerEmail = registerEmailController.text;
-                  final registerPassword = registerPasswordController.text;
+                  final registerEmail = registerEmailController.text.trim();
+                  final registerPassword = registerPasswordController.text.trim();
                   if (registerEmail.isNotEmpty && registerPassword.isNotEmpty) {
                     final result = {
                       'email': registerEmail,
@@ -266,11 +340,13 @@ class HelloWorldScreen extends StatefulWidget {
   final String userEmail;
   final VoidCallback onLogout;
   final List<Reserva> reservations;
+  final VoidCallback onReservationsUpdated;
 
   HelloWorldScreen({
     required this.userEmail,
     required this.onLogout,
     required this.reservations,
+    required this.onReservationsUpdated,
   });
 
   @override
@@ -301,6 +377,7 @@ class _HelloWorldScreenState extends State<HelloWorldScreen> {
                       userEmail: widget.userEmail,
                       onLogout: widget.onLogout,
                       reservations: widget.reservations,
+                      onReservationsUpdated: widget.onReservationsUpdated,
                     ),
                   ),
                 );
@@ -344,6 +421,7 @@ class _HelloWorldScreenState extends State<HelloWorldScreen> {
                           builder: (context) => CanchasScreen(
                             userEmail: widget.userEmail,
                             reservations: widget.reservations,
+                            onReservationsUpdated: widget.onReservationsUpdated,
                           ),
                         ),
                       );
@@ -364,6 +442,7 @@ class _HelloWorldScreenState extends State<HelloWorldScreen> {
                           builder: (context) => MisReservasScreen(
                             userEmail: widget.userEmail,
                             reservations: widget.reservations,
+                            onReservationsUpdated: widget.onReservationsUpdated,
                           ),
                         ),
                       );
@@ -385,6 +464,7 @@ class _HelloWorldScreenState extends State<HelloWorldScreen> {
                             userEmail: widget.userEmail,
                             onLogout: widget.onLogout,
                             reservations: widget.reservations,
+                            onReservationsUpdated: widget.onReservationsUpdated,
                           ),
                         ),
                       );
@@ -426,50 +506,82 @@ class _HelloWorldScreenState extends State<HelloWorldScreen> {
   }
 }
 
-// LISTA DE CANCHAS CON OPCIÓN DE RESERVA
+// LISTA DE CANCHAS
 class CanchasScreen extends StatelessWidget {
   final String userEmail;
   final List<Reserva> reservations;
+  final VoidCallback onReservationsUpdated;
 
-  CanchasScreen({required this.userEmail, required this.reservations});
+  CanchasScreen({
+    required this.userEmail,
+    required this.reservations,
+    required this.onReservationsUpdated,
+  });
 
-  final List<Map<String, String>> canchas = [
+  final List<Map<String, dynamic>> canchas = [
     {
       'nombre': 'Cancha Sintética La Amistad',
       'deporte': 'Fútbol 5 / Sintética',
       'precio': '\$60.000 / hora',
       'ubicacion': 'Calle 36 # 15-20',
+      'horaApertura': '08:00 AM',
+      'horaCierre': '10:00 PM',
       'imagen': 'https://images.unsplash.com/photo-1529900748604-07564a03e7a6?w=600&auto=format&fit=crop&q=60',
+      'horarios': [
+        '08:00 AM - 09:00 AM',
+        '09:00 AM - 10:00 AM',
+        '10:00 AM - 11:00 AM',
+        '02:00 PM - 03:00 PM',
+        '03:00 PM - 04:00 PM',
+        '04:00 PM - 05:00 PM',
+        '06:00 PM - 07:00 PM',
+        '07:00 PM - 08:00 PM',
+        '08:00 PM - 09:00 PM',
+        '09:00 PM - 10:00 PM',
+      ]
     },
     {
       'nombre': 'Coliseo Deportivo Central',
       'deporte': 'Baloncesto / Voleibol',
       'precio': '\$45.000 / hora',
       'ubicacion': 'Carrera 27 # 45-10',
+      'horaApertura': '07:00 AM',
+      'horaCierre': '09:00 PM',
       'imagen': 'https://images.unsplash.com/photo-1546519638-68e109498ffc?w=600&auto=format&fit=crop&q=60',
+      'horarios': [
+        '07:00 AM - 08:00 AM',
+        '08:00 AM - 09:00 AM',
+        '09:00 AM - 10:00 AM',
+        '03:00 PM - 04:00 PM',
+        '04:00 PM - 05:00 PM',
+        '05:00 PM - 06:00 PM',
+        '07:00 PM - 08:00 PM',
+        '08:00 PM - 09:00 PM',
+      ]
     },
     {
-      'nombre': 'Cancha de Grama Natural El Campín',
+      'nombre': 'Cancha El Campín',
       'deporte': 'Fútbol 8 / Grama',
       'precio': '\$90.000 / hora',
       'ubicacion': 'Av. Quebradaseca # 12-05',
+      'horaApertura': '08:00 AM',
+      'horaCierre': '08:00 PM',
       'imagen': 'https://images.unsplash.com/photo-1575361204480-aadea25e6e68?w=600&auto=format&fit=crop&q=60',
-    },
-    {
-      'nombre': 'Arena Pádel & Tenis',
-      'deporte': 'Pádel / Tenis',
-      'precio': '\$70.000 / hora',
-      'ubicacion': 'Anillo Vial Km 2',
-      'imagen': 'https://images.unsplash.com/photo-1554068865-24cecd4e34b8?w=600&auto=format&fit=crop&q=60',
+      'horarios': [
+        '08:00 AM - 09:00 AM',
+        '10:00 AM - 11:00 AM',
+        '02:00 PM - 03:00 PM',
+        '04:00 PM - 05:00 PM',
+        '06:00 PM - 07:00 PM',
+        '07:00 PM - 08:00 PM',
+      ]
     },
   ];
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: Text('Escenarios Deportivos'),
-      ),
+      appBar: AppBar(title: Text('Escenarios Deportivos')),
       body: Padding(
         padding: const EdgeInsets.all(12.0),
         child: ListView.builder(
@@ -479,9 +591,7 @@ class CanchasScreen extends StatelessWidget {
             return Card(
               margin: EdgeInsets.only(bottom: 16),
               elevation: 4,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(15),
-              ),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -510,10 +620,7 @@ class CanchasScreen extends StatelessWidget {
                             Expanded(
                               child: Text(
                                 cancha['nombre']!,
-                                style: TextStyle(
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.bold,
-                                ),
+                                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                               ),
                             ),
                             Container(
@@ -524,10 +631,7 @@ class CanchasScreen extends StatelessWidget {
                               ),
                               child: Text(
                                 cancha['precio']!,
-                                style: TextStyle(
-                                  color: Colors.green[800],
-                                  fontWeight: FontWeight.bold,
-                                ),
+                                style: TextStyle(color: Colors.green[800], fontWeight: FontWeight.bold),
                               ),
                             ),
                           ],
@@ -535,9 +639,10 @@ class CanchasScreen extends StatelessWidget {
                         SizedBox(height: 6),
                         Row(
                           children: [
-                            Icon(Icons.sports, size: 16, color: Colors.grey[600]),
+                            Icon(Icons.access_time, size: 16, color: Colors.grey[600]),
                             SizedBox(width: 4),
-                            Text(cancha['deporte']!, style: TextStyle(color: Colors.grey[700])),
+                            Text('Horario: ${cancha['horaApertura']} a ${cancha['horaCierre']}',
+                                style: TextStyle(color: Colors.grey[700])),
                           ],
                         ),
                         SizedBox(height: 4),
@@ -560,21 +665,17 @@ class CanchasScreen extends StatelessWidget {
                                     cancha: cancha,
                                     userEmail: userEmail,
                                     reservations: reservations,
+                                    onReservationsUpdated: onReservationsUpdated,
                                   ),
                                 ),
                               );
                             },
                             style: ElevatedButton.styleFrom(
                               backgroundColor: Colors.green,
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(8),
-                              ),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                             ),
                             icon: Icon(Icons.calendar_month, color: Colors.white),
-                            label: Text(
-                              'Reservar Cancha',
-                              style: TextStyle(color: Colors.white),
-                            ),
+                            label: Text('Ver Horarios y Reservar', style: TextStyle(color: Colors.white)),
                           ),
                         )
                       ],
@@ -590,16 +691,18 @@ class CanchasScreen extends StatelessWidget {
   }
 }
 
-// NUEVA PANTALLA: FORMULARIO DE SELECCIÓN DE FECHA Y HORA
+// FORMULARIO DE RESERVA CON HORARIOS ESTABLECIDOS Y BLOQUEO DE OCUPADOS
 class FormularioReservaScreen extends StatefulWidget {
-  final Map<String, String> cancha;
+  final Map<String, dynamic> cancha;
   final String userEmail;
   final List<Reserva> reservations;
+  final VoidCallback onReservationsUpdated;
 
   FormularioReservaScreen({
     required this.cancha,
     required this.userEmail,
     required this.reservations,
+    required this.onReservationsUpdated,
   });
 
   @override
@@ -607,39 +710,39 @@ class FormularioReservaScreen extends StatefulWidget {
 }
 
 class _FormularioReservaScreenState extends State<FormularioReservaScreen> {
-  DateTime? selectedDate;
-  TimeOfDay? selectedTime;
+  DateTime selectedDate = DateTime.now().add(Duration(days: 1));
+  String? selectedSlot;
+
+  String get _formattedDateStr =>
+      '${selectedDate.year}-${selectedDate.month.toString().padLeft(2, '0')}-${selectedDate.day.toString().padLeft(2, '0')}';
 
   Future<void> _selectDate(BuildContext context) async {
     final DateTime? picked = await showDatePicker(
       context: context,
-      initialDate: DateTime.now().add(Duration(days: 1)),
+      initialDate: selectedDate,
       firstDate: DateTime.now(),
       lastDate: DateTime.now().add(Duration(days: 30)),
     );
     if (picked != null && picked != selectedDate) {
       setState(() {
         selectedDate = picked;
+        selectedSlot = null; // Reiniciar slot seleccionado al cambiar de día
       });
     }
   }
 
-  Future<void> _selectTime(BuildContext context) async {
-    final TimeOfDay? picked = await showTimePicker(
-      context: context,
-      initialTime: TimeOfDay(hour: 18, minute: 0),
-    );
-    if (picked != null && picked != selectedTime) {
-      setState(() {
-        selectedTime = picked;
-      });
-    }
+  // Verifica si una hora específica de esta cancha ya fue tomada por ALGUIEN en esa fecha
+  bool _isSlotOccupied(String slot) {
+    return widget.reservations.any((r) =>
+        r.canchaNombre == widget.cancha['nombre'] &&
+        r.fechaStr == _formattedDateStr &&
+        r.horaSlot == slot);
   }
 
   void _confirmarReserva() {
-    if (selectedDate == null || selectedTime == null) {
+    if (selectedSlot == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Por favor selecciona la fecha y la hora.')),
+        SnackBar(content: Text('Por favor selecciona un turno u horario disponible.')),
       );
       return;
     }
@@ -649,14 +752,16 @@ class _FormularioReservaScreenState extends State<FormularioReservaScreen> {
       canchaNombre: widget.cancha['nombre']!,
       deporte: widget.cancha['deporte']!,
       precio: widget.cancha['precio']!,
-      fecha: selectedDate!,
-      hora: selectedTime!,
+      fechaStr: _formattedDateStr,
+      horaSlot: selectedSlot!,
       userEmail: widget.userEmail,
     );
 
     setState(() {
       widget.reservations.add(nuevaReserva);
     });
+
+    widget.onReservationsUpdated(); // Guardar en SharedPreferences
 
     showDialog(
       context: context,
@@ -665,14 +770,13 @@ class _FormularioReservaScreenState extends State<FormularioReservaScreen> {
           title: Text('¡Reserva Confirmada!'),
           content: Text(
             'Has reservado ${widget.cancha['nombre']} para el '
-            '${selectedDate!.day}/${selectedDate!.month}/${selectedDate!.year} a las '
-            '${selectedTime!.format(context)}.',
+            '$_formattedDateStr en el horario $selectedSlot.',
           ),
           actions: [
             TextButton(
               onPressed: () {
-                Navigator.of(context).pop(); // Cierra el diálogo
-                Navigator.of(context).pop(); // Regresa a la lista
+                Navigator.of(context).pop();
+                Navigator.of(context).pop();
               },
               child: Text('Aceptar'),
             ),
@@ -684,10 +788,10 @@ class _FormularioReservaScreenState extends State<FormularioReservaScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final List<String> horariosCancha = widget.cancha['horarios'];
+
     return Scaffold(
-      appBar: AppBar(
-        title: Text('Agendar Reserva'),
-      ),
+      appBar: AppBar(title: Text('Horarios Disponibles')),
       body: Padding(
         padding: const EdgeInsets.all(20.0),
         child: Column(
@@ -697,55 +801,94 @@ class _FormularioReservaScreenState extends State<FormularioReservaScreen> {
               widget.cancha['nombre']!,
               style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
             ),
-            SizedBox(height: 5),
+            SizedBox(height: 4),
             Text(
-              widget.cancha['deporte']!,
-              style: TextStyle(fontSize: 14, color: Colors.grey[600]),
+              'Apertura: ${widget.cancha['horaApertura']} - Cierre: ${widget.cancha['horaCierre']}',
+              style: TextStyle(fontSize: 14, color: Colors.grey[700]),
             ),
-            SizedBox(height: 25),
-            Text(
-              'Selecciona la fecha y la hora de tu partido:',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-            ),
-            SizedBox(height: 15),
+            SizedBox(height: 20),
             Card(
               child: ListTile(
                 leading: Icon(Icons.calendar_month, color: Colors.green),
-                title: Text(
-                  selectedDate == null
-                      ? 'Seleccionar Fecha'
-                      : 'Fecha: ${selectedDate!.day}/${selectedDate!.month}/${selectedDate!.year}',
-                ),
-                trailing: Icon(Icons.edit),
+                title: Text('Fecha: $_formattedDateStr'),
+                trailing: Icon(Icons.edit_calendar),
                 onTap: () => _selectDate(context),
               ),
             ),
+            SizedBox(height: 20),
+            Text(
+              'Selecciona un turno disponible:',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+            ),
             SizedBox(height: 10),
-            Card(
-              child: ListTile(
-                leading: Icon(Icons.access_time, color: Colors.green),
-                title: Text(
-                  selectedTime == null
-                      ? 'Seleccionar Hora de Inicio'
-                      : 'Hora: ${selectedTime!.format(context)}',
-                ),
-                trailing: Icon(Icons.edit),
-                onTap: () => _selectTime(context),
+            Expanded(
+              child: ListView.builder(
+                itemCount: horariosCancha.length,
+                itemBuilder: (context, index) {
+                  final slot = horariosCancha[index];
+                  final isOccupied = _isSlotOccupied(slot);
+                  final isSelected = selectedSlot == slot;
+
+                  return Container(
+                    margin: EdgeInsets.only(bottom: 8),
+                    child: ListTile(
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                        side: BorderSide(
+                          color: isSelected ? Colors.green : Colors.grey.shade300,
+                          width: isSelected ? 2 : 1,
+                        ),
+                      ),
+                      tileColor: isOccupied
+                          ? Colors.red.shade50
+                          : (isSelected ? Colors.green.shade50 : Colors.white),
+                      leading: Icon(
+                        isOccupied
+                            ? Icons.block
+                            : (isSelected ? Icons.check_circle : Icons.access_time),
+                        color: isOccupied
+                            ? Colors.red
+                            : (isSelected ? Colors.green : Colors.grey),
+                      ),
+                      title: Text(
+                        slot,
+                        style: TextStyle(
+                          fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                          color: isOccupied ? Colors.red.shade700 : Colors.black,
+                        ),
+                      ),
+                      trailing: Text(
+                        isOccupied ? 'OCUPADO' : (isSelected ? 'SELECCIONADO' : 'LIBRE'),
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                          color: isOccupied ? Colors.red : Colors.green,
+                        ),
+                      ),
+                      onTap: isOccupied
+                          ? null // Deshabilitar si está ocupado
+                          : () {
+                              setState(() {
+                                selectedSlot = slot;
+                              });
+                            },
+                    ),
+                  );
+                },
               ),
             ),
-            Spacer(),
             SizedBox(
               width: double.infinity,
               height: 48,
               child: ElevatedButton.icon(
-                onPressed: _confirmarReserva,
+                onPressed: selectedSlot == null ? null : _confirmarReserva,
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.green,
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(10),
                   ),
                 ),
-                icon: Icon(Icons.check_circle, color: Colors.white),
+                icon: Icon(Icons.check, color: Colors.white),
                 label: Text(
                   'Confirmar Reserva',
                   style: TextStyle(color: Colors.white, fontSize: 16),
@@ -763,8 +906,13 @@ class _FormularioReservaScreenState extends State<FormularioReservaScreen> {
 class MisReservasScreen extends StatefulWidget {
   final String userEmail;
   final List<Reserva> reservations;
+  final VoidCallback onReservationsUpdated;
 
-  MisReservasScreen({required this.userEmail, required this.reservations});
+  MisReservasScreen({
+    required this.userEmail,
+    required this.reservations,
+    required this.onReservationsUpdated,
+  });
 
   @override
   _MisReservasScreenState createState() => _MisReservasScreenState();
@@ -778,9 +926,7 @@ class _MisReservasScreenState extends State<MisReservasScreen> {
         .toList();
 
     return Scaffold(
-      appBar: AppBar(
-        title: Text('Mis Reservas'),
-      ),
+      appBar: AppBar(title: Text('Mis Reservas')),
       body: myReservations.isEmpty
           ? Center(
               child: Column(
@@ -812,7 +958,7 @@ class _MisReservasScreenState extends State<MisReservasScreen> {
                     title: Text(r.canchaNombre, style: TextStyle(fontWeight: FontWeight.bold)),
                     subtitle: Text(
                       '${r.deporte}\n'
-                      'Fecha: ${r.fecha.day}/${r.fecha.month}/${r.fecha.year} - ${r.hora.format(context)}',
+                      'Fecha: ${r.fechaStr} | Horario: ${r.horaSlot}',
                     ),
                     trailing: IconButton(
                       icon: Icon(Icons.delete, color: Colors.redAccent),
@@ -821,6 +967,7 @@ class _MisReservasScreenState extends State<MisReservasScreen> {
                         setState(() {
                           widget.reservations.removeWhere((item) => item.id == r.id);
                         });
+                        widget.onReservationsUpdated(); // Guardar cambios en el storage local
                         ScaffoldMessenger.of(context).showSnackBar(
                           SnackBar(content: Text('Reserva cancelada correctamente.')),
                         );
@@ -839,11 +986,13 @@ class ProfileScreen extends StatelessWidget {
   final String userEmail;
   final VoidCallback onLogout;
   final List<Reserva> reservations;
+  final VoidCallback onReservationsUpdated;
 
   ProfileScreen({
     required this.userEmail,
     required this.onLogout,
     required this.reservations,
+    required this.onReservationsUpdated,
   });
 
   @override
@@ -852,9 +1001,7 @@ class ProfileScreen extends StatelessWidget {
         reservations.where((r) => r.userEmail == userEmail).length;
 
     return Scaffold(
-      appBar: AppBar(
-        title: Text('Perfil de Usuario'),
-      ),
+      appBar: AppBar(title: Text('Perfil de Usuario')),
       body: Padding(
         padding: const EdgeInsets.all(20.0),
         child: Column(
@@ -892,19 +1039,9 @@ class ProfileScreen extends StatelessWidget {
                     builder: (context) => MisReservasScreen(
                       userEmail: userEmail,
                       reservations: reservations,
+                      onReservationsUpdated: onReservationsUpdated,
                     ),
                   ),
-                );
-              },
-            ),
-            ListTile(
-              leading: Icon(Icons.settings, color: Colors.blue),
-              title: Text('Configuración de cuenta'),
-              subtitle: Text('Cambiar contraseña o datos'),
-              trailing: Icon(Icons.arrow_forward_ios, size: 16),
-              onTap: () {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text('Configuración próximamente.')),
                 );
               },
             ),
